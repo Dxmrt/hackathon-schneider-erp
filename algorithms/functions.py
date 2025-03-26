@@ -19,7 +19,7 @@ def multiples_of_3(num):
     - From the combinations, the maximum number divisible by 3.
     - Note:
         - 0 is excluded from the count.
-        - The numbers must be formed from the digits of `num` and the combinatiosn can have different lengths.
+        - The numbers must be formed from the digits of `num` and the combinations can have different lengths.
         - If there is no number that has all the properties, return [0, None]
 
     Example:
