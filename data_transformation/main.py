@@ -2,96 +2,132 @@ import json
 import yaml
 import logging
 from typing import List, Dict, Any, Optional, ClassVar
-from pydantic import BaseModel
-from datetime import date
+from pydantic import BaseModel, ValidationError
+from datetime import date, datetime
 from pathlib import Path
-import time
+import csv
+import re
 
-# Setup Logging
+#Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ------------------------------
-#     ConfigLoader Class
-# ------------------------------
 
+
+#Cargar Configuración
 
 class ConfigLoader:
-    """Loads and stores configuration from a YAML file."""
-
     def __init__(self, yaml_file: Path):
         with yaml_file.open("r") as file:
             self.config = yaml.safe_load(file)
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Retrieve a value from the config."""
         return self.config.get(key, default)
 
 
-# ------------------------------
-#        Pydantic Models
-# ------------------------------
+#Funciones Utilitarias
 
+def clean_string(value: str) -> str:
+    return value.strip() if isinstance(value, str) else str(value).strip()
+
+
+def parse_date(date_str: str, date_formats: List[str]) -> date:
+    date_str = clean_string(date_str)
+    for fmt in date_formats:
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    logger.warning(f"Fecha inválida: {date_str}. Usando fecha actual.")
+    return date.today()
+
+
+def parse_amount(amount_str: str) -> float:
+    amount_str = re.sub(r'[^0-9.]', '', str(amount_str))
+    try:
+        return float(amount_str)
+    except ValueError:
+        logger.warning(f"Monto inválido: {amount_str}. Usando 0.")
+        return 0.0
+
+
+
+#Modelos Pydantic
 
 class Transaction(BaseModel):
-    config: ClassVar[ConfigLoader] = None
-
-    transaction_id: int
-    customer_name: Optional[str]
+    transaction_id: str
+    customer_name: str
     purchase_date: date
     total_amount: float
     status: str
 
-    @classmethod
-    def set_config(cls, config: ConfigLoader):
-        cls.config = config
-
-    # Implement Class atributes if needed
-
 
 class ItemDetail(BaseModel):
     details_id: int
-    transaction_id: int
+    transaction_id: str
     item: str
     quantity: int
     price: float
 
-    # Implement Class atributes if needed
+
+# Procesamiento de JSON a CSV
+
+def parse_json_to_csv(json_data: List[Dict[str, Any]], transaction_file: Path, details_file: Path,
+                      config: ConfigLoader):
+    transactions = []
+    item_details = []
+    details_id_counter = 1
+
+    for entry in json_data:
+        try:
+            transaction = Transaction(
+                transaction_id=str(entry.get(config.get('id_fields')[0], '')),
+                customer_name=clean_string(entry.get(config.get('name_fields')[0], '')),
+                purchase_date=parse_date(entry.get(config.get('date_fields')[0], ''), config.get('date_formats', [])),
+                total_amount=parse_amount(entry.get(config.get('amount_fields')[0], 0)),
+                status=entry.get(config.get('status_fields')[0], 'Unknown')
+            )
+            transactions.append(transaction)
+
+            for item in entry.get('items', []):
+                item_details.append(ItemDetail(
+                    details_id=details_id_counter,
+                    transaction_id=transaction.transaction_id,
+                    item=clean_string(item.get('item', 'Unknown')),
+                    quantity=int(item.get('quantity', 1)),
+                    price=parse_amount(item.get('price', 0))
+                ))
+                details_id_counter += 1
+        except ValidationError as e:
+            logger.error(f"Error validando transacción: {entry}. Error: {e}")
+
+    #Guardar CSV
+    with transaction_file.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(Transaction.model_fields.keys())
+        for trans in transactions:
+            writer.writerow(trans.model_dump().values())
+
+    with details_file.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(ItemDetail.model_fields.keys())
+        for detail in item_details:
+            writer.writerow(detail.model_dump().values())
+
+    logger.info(f"Procesadas {len(transactions)} transacciones y {len(item_details)} detalles de items")
 
 
-def parse_json_to_csv(
-    json_data: List[Dict[str, Any]],
-    transaction_file: Path,
-    details_file: Path,
-    config: ClassVar[ConfigLoader],
-):
-    pass  # To implement
 
-
-def process_single_file(filename: Path, transaction_file: Path, details_file: Path):
-    with filename.open("r", encoding="utf-8") as file:
-        json_data = json.load(file)
-
-    parse_json_to_csv(json_data, transaction_file, details_file)
-
+#Ejecutar Pipeline
 
 if __name__ == "__main__":
-    start = time.time()
-
-    # ------------------------------
-    #      Load Configuration
-    # ------------------------------
-
     config = ConfigLoader(Path("data_transformation/config.yml"))
 
-    input_files = config.get("files", {}).get("input", [])
-    output_file = Path(
-        config.get("files", {}).get("transaction_output", "transactions.csv")
-    )
-    details_file = Path(config.get("files", {}).get("details_output", "details.csv"))
+    input_file = Path(config.get("files")["input"])
+    transaction_output = Path(config.get("files")["transaction_output"])
+    details_output = Path(config.get("files")["details_output"])
 
-    if isinstance(input_files, str):
-        input_files = [input_files]  # Wrap single file in a list if input is a string
+    with input_file.open("r", encoding="utf-8") as file:
+        json_data = json.load(file)
 
-    for filename in input_files:
-        process_single_file(Path(filename), output_file, details_file, config)
+    parse_json_to_csv(json_data, transaction_output, details_output, config)
