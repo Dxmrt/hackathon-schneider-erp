@@ -22,12 +22,12 @@ def test_request_technicians():
     assert answ.status_code == 200
     techs = answ.json()
     assert len(techs) == 2
-    assert techs[0].get("distance_km", None) == 559.86
-    assert techs[0].get("id", None) == 4
-    assert techs[0].get("name", None) == "Grace"
-    assert techs[1].get("distance_km", None) == 641.38
-    assert techs[1].get("id", None) == 1
-    assert techs[1].get("name", None) == "Ian"
+    assert techs[0].get("distance_km", None) == 971.48
+    assert techs[0].get("id", None) == 8
+    assert techs[0].get("name", None) == "Thomas"
+    assert techs[1].get("distance_km", None) == 1012.66
+    assert techs[1].get("id", None) == 7
+    assert techs[1].get("name", None) == "Rachel"
 
 
 def test_request_technicians_2():

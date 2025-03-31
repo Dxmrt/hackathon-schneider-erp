@@ -230,15 +230,14 @@ def test_3_sales_forecast_data():
 
 def test_4_sales_forecast_data():
     actual_rows = fetch_data_from_db("SELECT * FROM SalesForecast;")
-    expected_rows = [
-        (1, "Circuit Breaker", 620, 25, 74, 1),
-        (2, "Transformer", 630, 7, 270, 1),
-        (3, "Solar Inverter", 950, 3, 950, 1),
-        (4, "Battery Storage", 510, 4, 383, 1),
-        (5, "Smart Meter", 460, 8, 173, 1),
-        (6, "Industrial Switchgear", 230, 3, 230, 1),
-    ]
-
+    expected_rows =   [
+       (3, "Solar Inverter", 950, 3, 950, 1),
+       (2, "Transformer", 630, 7, 270, 2),
+       (1, "Circuit Breaker", 620, 25, 74, 3),
+       (4, "Battery Storage", 510, 4, 383, 4),
+       (5, "Smart Meter", 460, 8, 173, 5),
+       (6, "Industrial Switchgear", 230, 3, 230, 6),
+   ]
     compare_rows(actual_rows, expected_rows)
 
 

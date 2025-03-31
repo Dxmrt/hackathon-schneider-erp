@@ -1,0 +1,2 @@
+transaction_id,customer_name,purchase_date,total_amount,status
+011,Joe Doe,2024-01-10,1200.5,Completed

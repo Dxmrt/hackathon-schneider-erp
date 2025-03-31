@@ -1,4 +1,15 @@
+# Log
+python-json-logger>=2.0.0
+
 pydantic~=2.11.0
 PyYAML~=6.0.2
-pytest
+typing-extensions>=4.9.0
+pytest~=8.3.5
 Flask~=3.1.0
+
+# Dev
+mypy>=1.8.0
+types-PyYAML>=6.0.0
+pip~=24.3.1
+requests~=2.32.3
+requests-mock~=1.12.1
