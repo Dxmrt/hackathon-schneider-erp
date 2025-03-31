@@ -1,106 +1,203 @@
+from flask import Flask, jsonify, request
 import sqlite3
-from flask import Flask, request, jsonify
-import requests
-import math
-import logging
 
+# Do not change this line
 DB_FILE = "sql_queries/erp.db"
 
 # Connect to SQLite database. Do not change this. Call this function within each of the requested functions.
 def get_db_connection(db_file):
     return sqlite3.connect(db_file)
 
-
-
-# Configuración de logging
-logging.basicConfig(level=logging.INFO)
-
-# Base URL of the legacy ERP API
-LEGACY_ERP_BASE_URL = (
-    "https://cdn.nuwe.io/challenges-ds-datasets/hackathon-schneider-erp"
-)
+# Initialize Flask app
 app = Flask(__name__)
 
+# Endpoint to get all customers
+@app.route("/api/customers", methods=["GET"])
+def get_customers():
+    """ Retrieve all customers """
 
-# Helper function for making API requests
-def fetch_data(url):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching data from {url}: {e}")
-        return None
+    conn = get_db_connection(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT customer_id, name, email, phone, address, country FROM Customers")
+    customers = cursor.fetchall()
+
+    customer_list = []
+    for customer in customers:
+        customer_list.append({
+            "id": customer[0],
+            "name": customer[1],
+            "email": customer[2],
+            "phone": customer[3],
+            "address": customer[4],
+            "country": customer[5]
+        })
+
+    conn.close()
+
+    if not customer_list:
+        return jsonify({"message": "No customers found."}), 404
+
+    return jsonify({"customers": customer_list}), 200
 
 
-# Retrieve product details from the legacy ERP
-@app.route("/api/products", methods=["GET"])
-def get_product():
-    try:
-        part_id = request.args.get("part_id")
-        if not part_id:
-            return jsonify({"error": "Parameter 'part_id' is required"}), 400
+# Endpoint to get a specific customer by ID
+@app.route("/api/customers/<int:customer_id>", methods=["GET"])
+def get_customer_by_id(customer_id):
+    """ Retrieve customer by ID """
 
-        part_data = fetch_data(f"{LEGACY_ERP_BASE_URL}/parts/{part_id}")
-        if not part_data:
-            return jsonify({"error": f"Product with ID {part_id} not found"}), 404
+    conn = get_db_connection(DB_FILE)
+    cursor = conn.cursor()
 
-        stock_data = fetch_data(f"{LEGACY_ERP_BASE_URL}/stock/{part_data.get('type')}")
-        if not stock_data:
-            return jsonify({"error": f"Stock for type {part_data.get('type')} not found"}), 404
+    cursor.execute("SELECT customer_id, name, email, phone, address, country FROM Customers WHERE customer_id = ?", (customer_id,))
+    customer = cursor.fetchone()
 
+    conn.close()
+
+    if customer:
         return jsonify({
-            "id": int(part_id),
-            "type": part_data.get("type"),
-            "stock": stock_data.get("stock"),
-            "status": part_data.get("status")
+            "id": customer[0],
+            "name": customer[1],
+            "email": customer[2],
+            "phone": customer[3],
+            "address": customer[4],
+            "country": customer[5]
         }), 200
-    except Exception as e:
-        logging.error(f"Internal error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+    else:
+        return jsonify({"message": "Customer not found."}), 404
 
 
-# Calculate distance using the Haversine formula
-def haversine(lat1, lon1, lat2, lon2):
-    r = 6371.0  # Earth's radius in km
-    lat1_rad, lon1_rad = math.radians(lat1), math.radians(lon1)
-    lat2_rad, lon2_rad = math.radians(lat2), math.radians(lon2)
-    dlat, dlon = lat2_rad - lat1_rad, lon2_rad - lon1_rad
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
-    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+# Endpoint to get all products
+@app.route("/api/products", methods=["GET"])
+def get_products():
+    """ Retrieve all products """
+
+    conn = get_db_connection(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT product_id, name, price, category FROM Products")
+    products = cursor.fetchall()
+
+    product_list = []
+    for product in products:
+        product_list.append({
+            "id": product[0],
+            "name": product[1],
+            "price": product[2],
+            "category": product[3]
+        })
+
+    conn.close()
+
+    if not product_list:
+        return jsonify({"message": "No products found."}), 404
+
+    return jsonify({"products": product_list}), 200
 
 
-# Get the 2 nearest technicians
-@app.route("/api/technicians/nearest", methods=["GET"])
-def get_nearest_technicians():
-    try:
-        lat, lon = request.args.get("lat"), request.args.get("lon")
-        if not lat or not lon:
-            return jsonify({"error": "Parameters 'lat' and 'lon' are required"}), 400
+# Endpoint to create a new order
+@app.route("/api/orders", methods=["POST"])
+def create_order():
+    """ Create a new order """
 
-        try:
-            lat, lon = float(lat), float(lon)
-        except ValueError:
-            return jsonify({"error": "Coordinates 'lat' and 'lon' must be valid numbers"}), 400
+    # Get the order details from the request body
+    data = request.get_json()
 
-        technicians = fetch_data(f"{LEGACY_ERP_BASE_URL}/technicians/available")
-        if not technicians:
-            return jsonify({"error": "Unable to retrieve technician list"}), 500
+    customer_id = data.get("customer_id")
+    products = data.get("products")  # Expected to be a list of product_ids and quantities
+    order_date = data.get("order_date")
+    status = data.get("status", "Pending")
 
-        technicians_with_distance = sorted([
-            {
-                "id": int(tech["id"]),
-                "name": tech["name"],
-                "distance_km": round(haversine(lat, lon, float(tech["latitude"]), float(tech["longitude"])), 2)
-            }
-            for tech in technicians
-        ], key=lambda x: x["distance_km"])
+    if not customer_id or not products:
+        return jsonify({"error": "Customer ID and products are required."}), 400
 
-        return jsonify(technicians_with_distance[:2]), 200
-    except Exception as e:
-        logging.error(f"Internal error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+    conn = get_db_connection(DB_FILE)
+    cursor = conn.cursor()
+
+    # Insert the order into the Orders table
+    cursor.execute("INSERT INTO Orders (customer_id, order_date, status) VALUES (?, ?, ?)",
+                   (customer_id, order_date, status))
+    order_id = cursor.lastrowid
+
+    # Insert the order details into the OrderDetails table
+    for product in products:
+        product_id = product["product_id"]
+        quantity = product["quantity"]
+        total_price = product["total_price"]
+
+        cursor.execute("INSERT INTO OrderDetails (order_id, product_id, quantity, total_price) VALUES (?, ?, ?, ?)",
+                       (order_id, product_id, quantity, total_price))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({"message": "Order created successfully.", "order_id": order_id}), 201
 
 
+# Endpoint to get all orders
+@app.route("/api/orders", methods=["GET"])
+def get_orders():
+    """ Retrieve all orders """
+
+    conn = get_db_connection(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT o.order_id, c.name, o.order_date, o.status
+        FROM Orders o
+        JOIN Customers c ON o.customer_id = c.customer_id
+    ''')
+    orders = cursor.fetchall()
+
+    order_list = []
+    for order in orders:
+        order_list.append({
+            "order_id": order[0],
+            "customer_name": order[1],
+            "order_date": order[2],
+            "status": order[3]
+        })
+
+    conn.close()
+
+    if not order_list:
+        return jsonify({"message": "No orders found."}), 404
+
+    return jsonify({"orders": order_list}), 200
+
+
+# Endpoint to get order details by order ID
+@app.route("/api/orders/<int:order_id>", methods=["GET"])
+def get_order_details(order_id):
+    """ Retrieve details of a specific order """
+
+    conn = get_db_connection(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT od.order_detail_id, p.name, od.quantity, od.total_price
+        FROM OrderDetails od
+        JOIN Products p ON od.product_id = p.product_id
+        WHERE od.order_id = ?
+    ''', (order_id,))
+    order_details = cursor.fetchall()
+
+    conn.close()
+
+    if order_details:
+        order_detail_list = []
+        for detail in order_details:
+            order_detail_list.append({
+                "order_detail_id": detail[0],
+                "product_name": detail[1],
+                "quantity": detail[2],
+                "total_price": detail[3]
+            })
+        return jsonify({"order_details": order_detail_list}), 200
+    else:
+        return jsonify({"message": "Order not found."}), 404
+
+
+# Start the Flask app
 if __name__ == "__main__":
-    app.run(debug=True, port=3000)
+    app.run(debug=True)
