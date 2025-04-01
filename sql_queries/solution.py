@@ -1,203 +1,154 @@
-from flask import Flask, jsonify, request
 import sqlite3
+from contextlib import closing
 
-# Do not change this line
 DB_FILE = "sql_queries/erp.db"
 
-# Connect to SQLite database. Do not change this. Call this function within each of the requested functions.
 def get_db_connection(db_file):
     return sqlite3.connect(db_file)
 
-# Initialize Flask app
-app = Flask(__name__)
+def execute_query(db_file, query, params=()):
+    """Executes a given SQL query within a database connection."""
+    with closing(get_db_connection(db_file)) as conn, closing(conn.cursor()) as cursor:
+        cursor.execute(query, params)
+        conn.commit()
 
-# Endpoint to get all customers
-@app.route("/api/customers", methods=["GET"])
-def get_customers():
-    """ Retrieve all customers """
+def fetch_one(db_file, query, params=()):
+    """Fetches a single result from a SQL query."""
+    with closing(get_db_connection(db_file)) as conn, closing(conn.cursor()) as cursor:
+        cursor.execute(query, params)
+        return cursor.fetchone()[0]
 
-    conn = get_db_connection(DB_FILE)
-    cursor = conn.cursor()
+def get_top_selling_products(db_file):
+    execute_query(db_file, "DROP TABLE IF EXISTS TopSellingProducts")
+    execute_query(db_file, """
+        CREATE TABLE TopSellingProducts (
+            category TEXT,
+            name TEXT,
+            total_sales REAL,
+            sales_rank INTEGER
+        )
+    """)
+    execute_query(db_file, """
+        WITH ProductSales AS (
+            SELECT p.category, p.name, SUM(od.quantity) AS total_quantity,
+                RANK() OVER (PARTITION BY p.category ORDER BY SUM(od.quantity) DESC) AS sales_rank
+            FROM Products p
+            JOIN OrderDetails od ON p.product_id = od.product_id
+            GROUP BY p.category, p.name
+        )
+        INSERT INTO TopSellingProducts (category, name, total_sales, sales_rank)
+        SELECT category, name, ROUND(total_quantity, 2), sales_rank
+        FROM ProductSales WHERE sales_rank <= 3
+    """)
 
-    cursor.execute("SELECT customer_id, name, email, phone, address, country FROM Customers")
-    customers = cursor.fetchall()
+def get_late_deliveries(db_file):
+    return fetch_one(db_file, """
+        SELECT ROUND(
+            CASE WHEN COUNT(*) > 0 THEN
+                (SUM(CASE WHEN JULIANDAY(delivery_date) - JULIANDAY(order_date) > 5 THEN 1 ELSE 0 END) * 100.0 / COUNT(*))
+            ELSE 0 END, 2)
+        FROM Orders WHERE status = 'Delivered' AND delivery_date IS NOT NULL
+    """) or 0.0
 
-    customer_list = []
-    for customer in customers:
-        customer_list.append({
-            "id": customer[0],
-            "name": customer[1],
-            "email": customer[2],
-            "phone": customer[3],
-            "address": customer[4],
-            "country": customer[5]
-        })
+def get_customer_sales_performance(db_file):
+    execute_query(db_file, "DROP TABLE IF EXISTS CustomerSalesPerformance")
+    execute_query(db_file, """
+        CREATE TABLE CustomerSalesPerformance (
+            customer_id INTEGER,
+            total_orders INTEGER,
+            total_revenue REAL,
+            avg_order_value REAL,
+            revenue_rank INTEGER,
+            customer_category TEXT
+        )
+    """)
+    execute_query(db_file, """
+        WITH CustomerRevenue AS (
+            SELECT c.customer_id, COUNT(o.order_id) AS total_orders, COALESCE(SUM(od.total_price), 0) AS total_revenue
+            FROM Customers c
+            LEFT JOIN Orders o ON c.customer_id = o.customer_id
+            LEFT JOIN OrderDetails od ON o.order_id = od.order_id
+            GROUP BY c.customer_id HAVING total_orders > 0
+        ),
+        RevenueStats AS (SELECT AVG(total_revenue) AS avg_revenue FROM CustomerRevenue),
+        CustomerMetrics AS (
+            SELECT cr.customer_id, cr.total_orders, ROUND(cr.total_revenue, 2) AS total_revenue,
+                ROUND(CASE WHEN cr.total_orders > 0 THEN cr.total_revenue / cr.total_orders ELSE 0 END, 2) AS avg_order_value,
+                RANK() OVER (ORDER BY cr.total_revenue DESC) AS revenue_rank,
+                CASE WHEN cr.total_revenue > (SELECT avg_revenue FROM RevenueStats) THEN 'High-Value Customer' ELSE 'Regular Customer' END AS customer_category
+            FROM CustomerRevenue cr
+        )
+        INSERT INTO CustomerSalesPerformance SELECT * FROM CustomerMetrics
+    """)
 
-    conn.close()
+def get_sales_forecast(db_file):
+    execute_query(db_file, "DROP TABLE IF EXISTS SalesForecast")
+    execute_query(db_file, """
+        CREATE TABLE SalesForecast (
+            product_id INTEGER,
+            product_name TEXT,
+            stock_quantity INTEGER,
+            sales_last_3_months INTEGER,
+            estimated_months_before_stockout INTEGER,
+            stock_rank INTEGER
+        )
+    """)
+    current_date = fetch_one(db_file, "SELECT date('now')")
+    execute_query(db_file, f"""
+        WITH ProductStock AS (
+            SELECT p.product_id, p.name AS product_name, SUM(i.stock_quantity) AS stock_quantity
+            FROM Products p JOIN Inventory i ON p.product_id = i.product_id
+            GROUP BY p.product_id
+        ),
+        ProductSales AS (
+            SELECT p.product_id, SUM(od.quantity) AS sales_quantity
+            FROM Products p
+            JOIN OrderDetails od ON p.product_id = od.product_id
+            JOIN Orders o ON od.order_id = o.order_id
+            WHERE o.order_date >= date('{current_date}', '-3 months')
+            GROUP BY p.product_id
+        ),
+        StockForecast AS (
+            SELECT ps.product_id, ps.product_name, ps.stock_quantity,
+                COALESCE(psa.sales_quantity, 0) AS sales_last_3_months,
+                CASE WHEN COALESCE(psa.sales_quantity, 0) > 0
+                    THEN CAST(ROUND(ps.stock_quantity / (psa.sales_quantity / 3.0)) AS INTEGER) ELSE NULL END AS estimated_months_before_stockout
+            FROM ProductStock ps LEFT JOIN ProductSales psa ON ps.product_id = psa.product_id
+        )
+        INSERT INTO SalesForecast
+        SELECT sf.*, RANK() OVER (ORDER BY sf.stock_quantity DESC) AS stock_rank FROM StockForecast sf
+    """)
 
-    if not customer_list:
-        return jsonify({"message": "No customers found."}), 404
-
-    return jsonify({"customers": customer_list}), 200
-
-
-# Endpoint to get a specific customer by ID
-@app.route("/api/customers/<int:customer_id>", methods=["GET"])
-def get_customer_by_id(customer_id):
-    """ Retrieve customer by ID """
-
-    conn = get_db_connection(DB_FILE)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT customer_id, name, email, phone, address, country FROM Customers WHERE customer_id = ?", (customer_id,))
-    customer = cursor.fetchone()
-
-    conn.close()
-
-    if customer:
-        return jsonify({
-            "id": customer[0],
-            "name": customer[1],
-            "email": customer[2],
-            "phone": customer[3],
-            "address": customer[4],
-            "country": customer[5]
-        }), 200
-    else:
-        return jsonify({"message": "Customer not found."}), 404
-
-
-# Endpoint to get all products
-@app.route("/api/products", methods=["GET"])
-def get_products():
-    """ Retrieve all products """
-
-    conn = get_db_connection(DB_FILE)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT product_id, name, price, category FROM Products")
-    products = cursor.fetchall()
-
-    product_list = []
-    for product in products:
-        product_list.append({
-            "id": product[0],
-            "name": product[1],
-            "price": product[2],
-            "category": product[3]
-        })
-
-    conn.close()
-
-    if not product_list:
-        return jsonify({"message": "No products found."}), 404
-
-    return jsonify({"products": product_list}), 200
-
-
-# Endpoint to create a new order
-@app.route("/api/orders", methods=["POST"])
-def create_order():
-    """ Create a new order """
-
-    # Get the order details from the request body
-    data = request.get_json()
-
-    customer_id = data.get("customer_id")
-    products = data.get("products")  # Expected to be a list of product_ids and quantities
-    order_date = data.get("order_date")
-    status = data.get("status", "Pending")
-
-    if not customer_id or not products:
-        return jsonify({"error": "Customer ID and products are required."}), 400
-
-    conn = get_db_connection(DB_FILE)
-    cursor = conn.cursor()
-
-    # Insert the order into the Orders table
-    cursor.execute("INSERT INTO Orders (customer_id, order_date, status) VALUES (?, ?, ?)",
-                   (customer_id, order_date, status))
-    order_id = cursor.lastrowid
-
-    # Insert the order details into the OrderDetails table
-    for product in products:
-        product_id = product["product_id"]
-        quantity = product["quantity"]
-        total_price = product["total_price"]
-
-        cursor.execute("INSERT INTO OrderDetails (order_id, product_id, quantity, total_price) VALUES (?, ?, ?, ?)",
-                       (order_id, product_id, quantity, total_price))
-
-    conn.commit()
-    conn.close()
-
-    return jsonify({"message": "Order created successfully.", "order_id": order_id}), 201
-
-
-# Endpoint to get all orders
-@app.route("/api/orders", methods=["GET"])
-def get_orders():
-    """ Retrieve all orders """
-
-    conn = get_db_connection(DB_FILE)
-    cursor = conn.cursor()
-
-    cursor.execute('''
-        SELECT o.order_id, c.name, o.order_date, o.status
-        FROM Orders o
-        JOIN Customers c ON o.customer_id = c.customer_id
-    ''')
-    orders = cursor.fetchall()
-
-    order_list = []
-    for order in orders:
-        order_list.append({
-            "order_id": order[0],
-            "customer_name": order[1],
-            "order_date": order[2],
-            "status": order[3]
-        })
-
-    conn.close()
-
-    if not order_list:
-        return jsonify({"message": "No orders found."}), 404
-
-    return jsonify({"orders": order_list}), 200
-
-
-# Endpoint to get order details by order ID
-@app.route("/api/orders/<int:order_id>", methods=["GET"])
-def get_order_details(order_id):
-    """ Retrieve details of a specific order """
-
-    conn = get_db_connection(DB_FILE)
-    cursor = conn.cursor()
-
-    cursor.execute('''
-        SELECT od.order_detail_id, p.name, od.quantity, od.total_price
-        FROM OrderDetails od
-        JOIN Products p ON od.product_id = p.product_id
-        WHERE od.order_id = ?
-    ''', (order_id,))
-    order_details = cursor.fetchall()
-
-    conn.close()
-
-    if order_details:
-        order_detail_list = []
-        for detail in order_details:
-            order_detail_list.append({
-                "order_detail_id": detail[0],
-                "product_name": detail[1],
-                "quantity": detail[2],
-                "total_price": detail[3]
-            })
-        return jsonify({"order_details": order_detail_list}), 200
-    else:
-        return jsonify({"message": "Order not found."}), 404
-
-
-# Start the Flask app
-if __name__ == "__main__":
-    app.run(debug=True)
+def get_discount_analysis(db_file):
+    execute_query(db_file, "DROP TABLE IF EXISTS DiscountAnalysis")
+    execute_query(db_file, """
+        CREATE TABLE DiscountAnalysis (
+            order_id INTEGER,
+            total_revenue REAL,
+            total_cost REAL,
+            profit REAL,
+            profit_margin_percentage REAL,
+            discount_percentage REAL,
+            profitability_rank INTEGER
+        )
+    """)
+    execute_query(db_file, """
+        WITH OrderMetrics AS (
+            SELECT od.order_id, SUM(od.total_price) AS actual_price,
+                SUM(p.price * od.quantity) AS list_price,
+                SUM(p.price * od.quantity * 0.7) AS cost_price
+            FROM OrderDetails od
+            JOIN Products p ON od.product_id = p.product_id
+            GROUP BY od.order_id
+        ),
+        OrderAnalysis AS (
+            SELECT order_id, ROUND(actual_price, 2) AS total_revenue,
+                ROUND(cost_price, 2) AS total_cost,
+                ROUND(actual_price - cost_price, 2) AS profit,
+                ROUND(CASE WHEN actual_price > 0 THEN ((actual_price - cost_price) / actual_price) * 100 ELSE 0 END, 2) AS profit_margin_percentage,
+                ROUND(CASE WHEN list_price > 0 THEN ((list_price - actual_price) / list_price) * 100 ELSE 0 END, 2) AS discount_percentage
+            FROM OrderMetrics
+        )
+        INSERT INTO DiscountAnalysis
+        SELECT *, RANK() OVER (ORDER BY profit DESC) AS profitability_rank FROM OrderAnalysis
+    """)
